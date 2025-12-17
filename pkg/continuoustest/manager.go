@@ -5,6 +5,7 @@ package continuoustest
 import (
 	"context"
 	"flag"
+	"fmt"
 	"time"
 
 	"github.com/go-kit/log"
@@ -36,9 +37,10 @@ func (cfg *ManagerConfig) RegisterFlags(f *flag.FlagSet) {
 }
 
 type Manager struct {
-	cfg    ManagerConfig
-	logger log.Logger
-	tests  []Test
+	cfg            ManagerConfig
+	logger         log.Logger
+	tests          []Test
+	onTestComplete func(name string, passed bool, err error)
 }
 
 func NewManager(cfg ManagerConfig, logger log.Logger) *Manager {
@@ -52,11 +54,15 @@ func (m *Manager) AddTest(t Test) {
 	m.tests = append(m.tests, t)
 }
 
+func (m *Manager) SetOnTestComplete(fn func(name string, passed bool, err error)) {
+	m.onTestComplete = fn
+}
+
 func (m *Manager) Run(ctx context.Context) error {
 	// Initialize all tests.
 	for _, t := range m.tests {
 		if err := t.Init(ctx, time.Now().UTC()); err != nil {
-			return err
+			return fmt.Errorf("%s init: %w", t.Name(), err)
 		}
 	}
 
@@ -67,15 +73,20 @@ func (m *Manager) Run(ctx context.Context) error {
 		t := test
 		group.Go(func() error {
 
-			// Run it immediately, and then every configured period.
 			err := t.Run(ctx, time.Now().UTC())
 			if m.cfg.SmokeTest {
 				if err != nil {
 					level.Info(m.logger).Log("msg", "Test failed", "test", t.Name(), "err", err)
-				} else {
-					level.Info(m.logger).Log("msg", "Test passed", "test", t.Name())
+					if m.onTestComplete != nil {
+						m.onTestComplete(t.Name(), false, err)
+					}
+					return fmt.Errorf("%s: %w", t.Name(), err)
 				}
-				return err
+				level.Info(m.logger).Log("msg", "Test passed", "test", t.Name())
+				if m.onTestComplete != nil {
+					m.onTestComplete(t.Name(), true, nil)
+				}
+				return nil
 			}
 
 			ticker := time.NewTicker(m.cfg.RunInterval)
